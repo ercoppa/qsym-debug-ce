@@ -18,6 +18,8 @@ namespace qsym {
     void updateBitmap();
     bool isInteresting() { return is_interesting_; }
 
+    ADDRINT currentBasicBlock() { return last_pc_; }
+
   private:
     std::vector<ADDRINT> call_stack_;
     XXH32_hash_t call_stack_hash_;

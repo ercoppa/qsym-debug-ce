@@ -185,6 +185,38 @@ void Solver::addJcc(ExprRef e, bool taken, ADDRINT pc) {
   if (is_interesting)
     negatePath(e, taken);
   addConstraint(e, taken, is_interesting);
+
+#if DEBUG_CHECK_PI_SOLVER
+  reset();
+  LOG_INFO("Checking PI\n");
+  syncConstraints(e);
+  if(solver_.check() == z3::unsat) {
+    LOG_FATAL("Adding infeasible constraints: " + std::string(taken ? "" : "!") + e->toString() + "\n");
+    abort();
+  } else {
+    // printf("\nPI OK\n\n");
+  }
+  reset();
+#endif
+
+#if DEBUG_CHECK_PI_CONCRETE
+  reset();
+  LOG_INFO("Checking PI CONCRETE\n");
+  syncConstraints(e);
+
+  z3::expr_vector assertions = solver_.assertions();
+  if (assertions.size() > 0) {
+    Z3_ast query = z3::mk_and(assertions);
+    if(checkConsistencySMT(query, 1) == 0) {
+      LOG_FATAL("Adding infeasible constraints: " + std::string(taken ? "" : "!") + e->toString() + "\n");
+      abort();
+    } else {
+      // printf("\nPI OK\n\n");
+    }
+  }
+  reset();
+#endif
+
 }
 
 void Solver::addAddr(ExprRef e, ADDRINT addr) {
@@ -541,5 +573,83 @@ void Solver::checkFeasible() {
     LOG_FATAL("Infeasible constraints: " + solver_.to_smt2() + "\n");
 #endif
 }
+
+#if DEBUG_CONSISTENCY_CHECK
+int Solver::checkConsistencySMT(Z3_ast e, uint64_t expected_value) {
+
+  static Z3_model m = NULL;
+  if (m == NULL) {
+    Z3_set_ast_print_mode(context_, Z3_PRINT_LOW_LEVEL);
+    std::vector<UINT8> values = inputs_;
+    m = Z3_mk_model(context_);
+    Z3_model_inc_ref(context_, m);
+    Z3_sort sort = Z3_mk_bv_sort(context_, 8);
+    for (size_t i = 0; i < inputs_.size(); i++) {
+
+      z3::symbol s = context_.int_symbol(i);
+      z3::expr v = context_.bv_val(inputs_[i], 8);
+      
+      // printf("%s\n", Z3_ast_to_string(context_, v));
+
+      Z3_func_decl decl = Z3_mk_func_decl(context_, s, 0, NULL, sort);
+      Z3_add_const_interp(context_, m, decl, v);
+    }
+
+    // printf("Model:\n%s\n", Z3_model_to_string(context_, m));
+  }
+
+  // printf("EXPR: %s\n", Z3_ast_to_string(context_, e));
+
+  uint64_t  value;
+  Z3_ast    solution;
+  Z3_bool   successfulEval =
+      Z3_model_eval(context_, m, e, Z3_TRUE, &solution);
+  assert(successfulEval && "Failed to evaluate model");
+
+  if (Z3_get_ast_kind(context_, solution) == Z3_NUMERAL_AST) {
+    Z3_bool successGet =
+          Z3_get_numeral_uint64(context_, solution, (uint64_t*)&value);
+    assert(successGet);
+    if (value != expected_value) {
+      Z3_set_ast_print_mode(context_, Z3_PRINT_LOW_LEVEL);
+      printf("[%d] %s\n", successGet, Z3_ast_to_string(context_, e));
+      printf("FAILURE: %lx vs expected=%lx\n", value, expected_value);
+    } else {
+      printf("SUCCESS: %lx vs expected=%lx\n", value, expected_value);
+    }
+    return value == expected_value;
+  } else {
+
+    Z3_lbool res = Z3_get_bool_value(context_, solution);
+    if (res == Z3_L_TRUE) {
+      value = 1;
+      if (value != expected_value) {
+        Z3_set_ast_print_mode(context_, Z3_PRINT_LOW_LEVEL);
+        printf("%s\n", Z3_ast_to_string(context_, e));
+        printf("BOOL FAILURE: %lx vs expected=%lx\n", value, expected_value);
+      }
+      return value == expected_value;
+    } else if (res == Z3_L_FALSE) {
+      value = 0;
+      if (value != expected_value) {
+        Z3_set_ast_print_mode(context_, Z3_PRINT_LOW_LEVEL);
+        printf("%s\n", Z3_ast_to_string(context_, e));
+        printf("BOOL FAILURE: %lx vs expected=%lx\n", value, expected_value);
+      }
+      return value == expected_value;
+    } else {
+      printf("KIND: %x\n", Z3_get_ast_kind(context_, solution));
+      Z3_set_ast_print_mode(context_, Z3_PRINT_LOW_LEVEL);
+      printf("EXPR: %s\n", Z3_ast_to_string(context_, e));
+      assert(0 && "Cannot evaluate");
+      abort();
+    }
+  }
+}
+
+int Solver::checkConsistency(ExprRef e, uint64_t expected_value) {
+  return checkConsistencySMT(e->toZ3Expr(), expected_value);
+}
+#endif
 
 } // namespace qsym

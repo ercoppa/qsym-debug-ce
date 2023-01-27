@@ -15,6 +15,8 @@
 #include "expr_builder.h"
 #include "dependency.h"
 
+#include "../../../../../../config.h"
+
 namespace qsym {
 
 extern z3::context *g_z3_context;
@@ -47,6 +49,11 @@ public:
   UINT8 getInput(ADDRINT index);
 
   ADDRINT last_pc() { return last_pc_; }
+
+#if DEBUG_CONSISTENCY_CHECK
+  int checkConsistencySMT(Z3_ast e, uint64_t expected_value);
+  int checkConsistency(ExprRef e, uint64_t expected_value);
+#endif
 
 protected:
   std::string           input_file_;
