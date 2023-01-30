@@ -2,6 +2,12 @@
 #include <byteswap.h>
 #include "solver.h"
 
+#if DEBUG_CHECK_INPUTS
+static uint32_t debug_count;
+static uint32_t debug_hash;
+static uint32_t debug_taken;
+#endif
+
 namespace qsym {
 
 namespace {
@@ -182,6 +188,76 @@ void Solver::addJcc(ExprRef e, bool taken, ADDRINT pc) {
   else
     is_interesting = isInterestingJcc(e, taken, pc);
 
+#if DEBUG_CHECK_INPUTS
+  debug_count += 1;
+  debug_taken = taken ? 1 : 0;
+  debug_hash ^= pc; 
+
+  // printf("DEBUG HASH: %lx - %lx\n", debug_hash, pc);
+
+  static int check_input = -1;
+  static uint32_t check_input_count = 0;
+  static uint32_t check_input_hash = 0;
+  static uint32_t check_input_taken = 0;
+  if (check_input == -1) {
+
+    if (getenv("DEBUG_CHECK_INPUT"))
+      check_input = 1;
+    else
+      check_input = 0;
+
+    if (check_input) {
+      if (getenv("DEBUG_CHECK_INPUT_COUNT"))
+        check_input_count = atoi(getenv("DEBUG_CHECK_INPUT_COUNT"));
+      else
+        abort();
+
+      if (getenv("DEBUG_CHECK_INPUT_HASH"))
+        check_input_hash = strtol(getenv("DEBUG_CHECK_INPUT_HASH"), NULL, 16);
+      else
+        abort();
+      
+      if (getenv("DEBUG_CHECK_INPUT_TAKEN"))
+        check_input_taken = atoi(getenv("DEBUG_CHECK_INPUT_TAKEN"));
+      else
+        abort();
+    }
+  }
+
+  if (check_input) {
+    // printf("Checking...\n");
+    if (debug_count == check_input_count) {
+      if (debug_hash == check_input_hash) {
+        if (debug_taken != check_input_taken) {
+          printf("Input is taking the expected direction!\n");
+          exit(0);
+        } else {
+          printf("Input is divergent: it reaches the same branch but does not take the expected direction!\n");
+          exit(66);
+        }
+      } else {
+        printf("Input is divergent: it does take the same path! [hash is different: %x vs expected=%x]\n", debug_hash, check_input_hash);
+        exit(66);
+      }
+    } else if (debug_count > check_input_count) {
+      printf("Input is divergent: it does take the same path! [count is larger]\n");
+      exit(66);
+    }
+  } 
+#endif
+
+#if DEBUG_SKIP_QUERIES
+  static int skip = -1;
+  if (skip == -1) {
+    if (getenv("SYMCC_SKIP_QUERIES"))
+      skip = 1;
+    else
+      skip = 0;
+  }
+  if (skip)
+    is_interesting = false;
+#endif
+
   if (is_interesting)
     negatePath(e, taken);
   addConstraint(e, taken, is_interesting);
@@ -356,6 +432,17 @@ void Solver::saveValues(const std::string& postfix) {
   // Add postfix to record where it is genereated
   if (!postfix.empty())
       fname = fname + "-" + postfix;
+#if DEBUG_CHECK_INPUTS
+  else {
+    static char s_count[16];
+    static char s_hash[32];
+    sprintf(s_hash, "%x", debug_hash);
+    sprintf(s_count, "%d", debug_count);
+    fname = fname + "_" + std::string(s_hash) + "_" + std::string(s_count) + "_" + (debug_taken ? "1" : "0");
+  }
+#endif
+
+
   ofstream of(fname, std::ofstream::out | std::ofstream::binary);
   LOG_INFO("New testcase: " + fname + "\n");
   if (of.fail())
