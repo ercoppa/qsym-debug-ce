@@ -264,7 +264,7 @@ void Solver::addJcc(ExprRef e, bool taken, ADDRINT pc) {
 
 #if DEBUG_CHECK_PI_SOLVER
   reset();
-  LOG_INFO("Checking PI\n");
+  printf("Checking PI at %lx\n", pc);
   syncConstraints(e);
   if(solver_.check() == z3::unsat) {
     LOG_FATAL("Adding infeasible constraints: " + std::string(taken ? "" : "!") + e->toString() + "\n");
@@ -638,6 +638,7 @@ void Solver::negatePath(ExprRef e, bool taken) {
   reset();
   syncConstraints(e);
   addToSolver(e, !taken);
+  // printf("CONSTRAINT: %s\n", e->toString().c_str());
   bool sat = checkAndSave();
   if (!sat) {
     reset();
@@ -661,7 +662,7 @@ void Solver::checkFeasible() {
 #endif
 }
 
-#if DEBUG_CONSISTENCY_CHECK
+#if DEBUG_CONSISTENCY_CHECK || DEBUG_CHECK_PI_CONCRETE
 int Solver::checkConsistencySMT(Z3_ast e, uint64_t expected_value) {
 
   static Z3_model m = NULL;

@@ -50,7 +50,7 @@ public:
 
   ADDRINT last_pc() { return last_pc_; }
 
-#if DEBUG_CONSISTENCY_CHECK
+#if DEBUG_CONSISTENCY_CHECK || DEBUG_CHECK_PI_CONCRETE
   int checkConsistencySMT(Z3_ast e, uint64_t expected_value);
   int checkConsistency(ExprRef e, uint64_t expected_value);
 #endif
