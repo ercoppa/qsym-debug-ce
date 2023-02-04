@@ -31,6 +31,14 @@ bool isAllOnes(ExprRef e) {
 
 } // namespace
 
+#if DEBUG_CHECK_EXPR_OPTS
+extern Solver *g_solver;
+void checkOpt(ExprRef e0, ExprRef e1) {
+  if (g_solver)
+    g_solver->checkConsistencyOpt(e0, e1);
+}
+#endif
+
 bool canEvaluateTruncated(ExprRef e, UINT bits, UINT depth=0) {
   if (depth > 1)
     return false;
@@ -214,8 +222,15 @@ ExprRef CommutativeExprBuilder::createSub(ExprRef l, ExprRef r)
   ConstantExprRef ce_r = castAs<ConstantExpr>(r);
 
   if (nce_l != NULL && ce_r != NULL) {
+#if DEBUG_CHECK_EXPR_OPTS
+    ExprRef e0 = ExprBuilder::createSub(l, r);
+    ExprRef e1 = createAdd(createNeg(ce_r), nce_l);
+    checkOpt(e0, e1);
+    return e1;
+#else
     // X - C_0 = -C_0 + X
     return createAdd(createNeg(ce_r), nce_l);
+#endif
   }
   else
     return ExprBuilder::createSub(l, r);
@@ -227,7 +242,14 @@ ExprRef CommonSimplifyExprBuilder::createConcat(ExprRef l, ExprRef r) {
     if (auto ee_r = castAs<ExtractExpr>(r)) {
       if (ee_l->expr() == ee_r->expr()
           && ee_r->index() + ee_r->bits() == ee_l->index()) {
+#if DEBUG_CHECK_EXPR_OPTS
+      ExprRef e0 = ExprBuilder::createConcat(l, r);
+      ExprRef e1 = createExtract(ee_l->expr(), ee_r->index(), ee_r->bits() + ee_l->bits());
+      checkOpt(e0, e1);
+      return e1;
+#else
         return createExtract(ee_l->expr(), ee_r->index(), ee_r->bits() + ee_l->bits());
+#endif
       }
     }
   }
@@ -237,10 +259,17 @@ ExprRef CommonSimplifyExprBuilder::createConcat(ExprRef l, ExprRef r) {
     if (auto ext = castAs<ExtExpr>(ee_l->expr())) {
       if (ee_l->index() == r->bits()
           && equalShallowly(*ext->expr(), *r)) {
+#if DEBUG_CHECK_EXPR_OPTS
+        ExprRef e0 = ExprBuilder::createConcat(l, r);
+        ExprRef e1 = createExtract(ee_l->expr(), 0, ee_l->bits() + r->bits());
+        checkOpt(e0, e1);
+        return e1;
+#else
         // Here we used equalShallowly
         // because same ExtractExpr can have different addresses,
         // but using deep comparison is expensive
         return createExtract(ee_l->expr(), 0, ee_l->bits() + r->bits());
+#endif
       }
     }
   }
@@ -253,32 +282,88 @@ ExprRef CommonSimplifyExprBuilder::createExtract(
   if (auto ce = castAs<ConcatExpr>(e)) {
     // skips right part
     if (index >= ce->getRight()->bits())
+#if DEBUG_CHECK_EXPR_OPTS
+    {
+      ExprRef e0 = ExprBuilder::createExtract(e, index, bits);
+      ExprRef e1 = createExtract(ce->getLeft(), index - ce->getRight()->bits(), bits);
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createExtract(ce->getLeft(), index - ce->getRight()->bits(), bits);
+#endif
 
     // skips left part
     if (index + bits <= ce->getRight()->bits())
+#if DEBUG_CHECK_EXPR_OPTS
+    {
+      ExprRef e0 = ExprBuilder::createExtract(e, index, bits);
+      ExprRef e1 = createExtract(ce->getRight(), index, bits);
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createExtract(ce->getRight(), index, bits);
-
+#endif
+      
     // E(C(C_0,y)) ==> C(E(C_0), E(y))
     if (ce->getLeft()->isConstant()) {
+#if DEBUG_CHECK_EXPR_OPTS
+    {
+      ExprRef e0 = ExprBuilder::createExtract(e, index, bits);
+      ExprRef e1 = createConcat(
+          createExtract(ce->getLeft(), 0, bits - ce->getRight()->bits() + index),
+          createExtract(ce->getRight(), index, ce->getRight()->bits() - index));
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createConcat(
           createExtract(ce->getLeft(), 0, bits - ce->getRight()->bits() + index),
           createExtract(ce->getRight(), index, ce->getRight()->bits() - index));
+#endif
     }
   }
   else if (auto ee = castAs<ExtExpr>(e)) {
     // E(Ext(x), i, b) && len(x) >= i + b == E(x, i, b)
     if (ee->expr()->bits() >= index + bits)
+#if DEBUG_CHECK_EXPR_OPTS
+    {
+      ExprRef e0 = ExprBuilder::createExtract(e, index, bits);
+      ExprRef e1 = createExtract(ee->expr(), index, bits);
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createExtract(ee->expr(), index, bits);
+#endif
 
     // E(ZExt(x), i, b) && len(x) < i == 0
     if (ee->kind() == ZExt
         && index >= ee->expr()->bits())
+#if DEBUG_CHECK_EXPR_OPTS
+    {
+      ExprRef e0 = ExprBuilder::createExtract(e, index, bits);
+      ExprRef e1 = createConstant(0, bits);
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createConstant(0, bits);
+#endif
   }
   else if (auto ee = castAs<ExtractExpr>(e)) {
     // E(E(x, i1, b1), i2, b2) == E(x, i1 + i2, b2)
+#if DEBUG_CHECK_EXPR_OPTS
+    {
+      ExprRef e0 = ExprBuilder::createExtract(e, index, bits);
+      ExprRef e1 = createExtract(ee->expr(), ee->index() + index, bits);
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
     return createExtract(ee->expr(), ee->index() + index, bits);
+#endif
   }
 
   if (index == 0 && e->bits() == bits)
@@ -290,7 +375,16 @@ ExprRef CommonSimplifyExprBuilder::createZExt(
     ExprRef e, UINT32 bits) {
   // allow shrinking
   if (e->bits() > bits)
+#if DEBUG_CHECK_EXPR_OPTS 
+  {
+    ExprRef e0 = ExprBuilder::createZExt(e, bits);
+    ExprRef e1 = createExtract(e, 0, bits);
+    checkOpt(e0, e1);
+    return e1;
+  }
+#else
     return createExtract(e, 0, bits);
+#endif
   if (e->bits() == bits)
     return e;
   return ExprBuilder::createZExt(e, bits);
@@ -344,11 +438,24 @@ ExprRef CommonSimplifyExprBuilder::createAnd(ExprRef l, ExprRef r)
       ExprRef l_left = createExtract(l, r_right->bits(), r_left->bits());
 
       if (ExprRef and_left = simplifyAnd(l_left, r_left)) {
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createAnd(l, r);
+        ExprRef e1 = createConcat(
+            and_left,
+            createAnd(
+              createExtract(l, 0,  r_right->bits()),
+              r_right));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createConcat(
             and_left,
             createAnd(
               createExtract(l, 0,  r_right->bits()),
               r_right));
+#endif
       }
     }
   }
@@ -379,11 +486,24 @@ ExprRef CommonSimplifyExprBuilder::createOr(ExprRef l, ExprRef r) {
       ExprRef l_left = createExtract(l, r_right->bits(), r_left->bits());
 
       if (ExprRef and_left = simplifyOr(l_left, r_left)) {
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createOr(l, r);
+        ExprRef e1 = createConcat(
+                and_left,
+                createOr(
+                  createExtract(l, 0,  r_right->bits()),
+                  r_right));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createConcat(
             and_left,
             createOr(
               createExtract(l, 0,  r_right->bits()),
               r_right));
+#endif
       }
     }
   }
@@ -410,11 +530,24 @@ ExprRef CommonSimplifyExprBuilder::createXor(ExprRef l, ExprRef r) {
       ExprRef l_left = createExtract(l, r_right->bits(), r_left->bits());
 
       if (ExprRef and_left = simplifyXor(l_left, r_left)) {
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createXor(l, r);
+        ExprRef e1 = createConcat(
+            and_left,
+            createXor(
+              createExtract(l, 0,  r_right->bits()),
+              r_right));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createConcat(
             and_left,
             createXor(
               createExtract(l, 0,  r_right->bits()),
               r_right));
+#endif
       }
     }
   }
@@ -440,7 +573,16 @@ ExprRef CommonSimplifyExprBuilder::createShl(ExprRef l, ExprRef r) {
     if (rval % CHAR_BIT == 0) {
       ExprRef zero = createConstant(0, rval);
       ExprRef partial = createExtract(l, 0, l->bits() - rval);
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createShl(l, r);
+        ExprRef e1 = createConcat(partial, zero);
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
       return createConcat(partial, zero);
+#endif
     }
   }
 
@@ -465,7 +607,16 @@ ExprRef CommonSimplifyExprBuilder::createLShr(ExprRef l, ExprRef r) {
     if (rval % CHAR_BIT == 0) {
       ExprRef zero = createConstant(0, rval);
       ExprRef partial = createExtract(l, rval, l->bits() - rval);
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createLShr(l, r);
+        ExprRef e1 = createConcat(zero, partial);
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
       return createConcat(zero, partial);
+#endif
     }
   }
 
@@ -631,13 +782,32 @@ ExprRef SymbolicExprBuilder::createConcat(ExprRef l, ExprRef r) {
     ConstantExprRef ce_l = castAs<ConstantExpr>(l);
     ConstantExprRef ce_x = castAs<ConstantExpr>(ce->getLeft());
     if (ce_l != NULL && ce_x != NULL)
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createConcat(l, r);
+        ExprRef e1 = createConcat(createConcat(ce_l, ce_x), ce->getRight());
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
       return createConcat(createConcat(ce_l, ce_x), ce->getRight());
+#endif
   }
 
   // C(C(x ,y), z) => C(x, C(y, z))
   if (auto ce = castAs<ConcatExpr>(l)) {
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createConcat(l, r);
+      ExprRef e1 = createConcat(l->getLeft(),
+        createConcat(l->getRight(), r));
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
     return createConcat(l->getLeft(),
         createConcat(l->getRight(), r));
+#endif
   }
 
   return ExprBuilder::createConcat(l, r);
@@ -649,7 +819,16 @@ ExprRef SymbolicExprBuilder::createExtract(ExprRef op, UINT32 index, UINT32 bits
       && bits % 8 == 0
       && canEvaluateTruncated(op, bits)) {
       if (ExprRef e = evaluateInDifferentType(this, op, index, bits))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createExtract(op, index, bits);
+        ExprRef e1 = e;
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return e;
+#endif
   }
   return ExprBuilder::createExtract(op, index, bits);
 }
@@ -703,20 +882,56 @@ ExprRef SymbolicExprBuilder::createAdd(ConstantExprRef l, NonConstantExprRef r) 
     case Add: {
       // C_0 + (C_1 + X) ==> (C_0 + C_1) + X
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getFirstChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createAdd(l, r);
+        ExprRef e1 = createAdd(createAdd(l, CE), r->getSecondChild());
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(createAdd(l, CE), r->getSecondChild());
+#endif
       // C_0 + (X + C_1) ==> (C_0 + C_1) + X
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getSecondChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createAdd(l, r);
+        ExprRef e1 = createAdd(createAdd(l, CE), r->getFirstChild());
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(createAdd(l, CE), r->getFirstChild());
+#endif
       break;
     }
 
     case Sub: {
       // C_0 + (C_1 - X) ==> (C_0 + C1) - X
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getFirstChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createAdd(l, r);
+        ExprRef e1 = createSub(createAdd(l, CE), r->getSecondChild());
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createSub(createAdd(l, CE), r->getSecondChild());
+#endif
       // C_0 + (X - C_1) ==> (C_0 - C1) + X
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getSecondChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createAdd(l, r);
+        ExprRef e1 = createAdd(createSub(l, CE), r->getFirstChild());
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(createSub(l, CE), r->getFirstChild());
+#endif
       break;
     }
     default:
@@ -747,20 +962,56 @@ ExprRef SymbolicExprBuilder::createAdd(NonConstantExprRef l, NonConstantExprRef 
     case Add: {
       // X + (C_0 + Y) ==> C_0 + (X + Y)
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getFirstChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createAdd(l, r);
+        ExprRef e1 = createAdd(CE, createAdd(l, r->getSecondChild()));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(CE, createAdd(l, r->getSecondChild()));
+#endif
       // X + (Y + C_0) ==> C_0 + (X + Y)
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getSecondChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createAdd(l, r);
+        ExprRef e1 = createAdd(CE, createAdd(l, r->getFirstChild()));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(CE, createAdd(l, r->getFirstChild()));
+#endif
       break;
     }
 
     case Sub: {
       // X + (C_0 - Y) ==> C_0 + (X - Y)
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getFirstChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createAdd(l, r);
+        ExprRef e1 = createAdd(CE, createSub(l, r->getSecondChild()));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(CE, createSub(l, r->getSecondChild()));
+#endif
       // X + (Y - C_0) ==> -C_0 + (X + Y)
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getSecondChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createAdd(l, r);
+        ExprRef e1 = createAdd(createNeg(CE), createAdd(l, r->getFirstChild()));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(createNeg(CE), createAdd(l, r->getFirstChild()));
+#endif
       break;
     }
     default:
@@ -773,11 +1024,29 @@ ExprRef SymbolicExprBuilder::createAdd(NonConstantExprRef l, NonConstantExprRef 
 ExprRef SymbolicExprBuilder::createSub(ExprRef l, ExprRef r) {
   if (NonConstantExprRef nce_r = castAs<NonConstantExpr>(r)) {
     if (ConstantExprRef ce_l = castAs<ConstantExpr>(l))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createSub(ce_l, nce_r);
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
       return createSub(ce_l, nce_r);
+#endif
     else {
       NonConstantExprRef nce_l = castAs<NonConstantExpr>(l);
       QSYM_ASSERT(nce_l != NULL);
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createSub(nce_l, nce_r);
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
       return createSub(nce_l, nce_r);
+#endif
     }
   }
   else
@@ -789,21 +1058,57 @@ ExprRef SymbolicExprBuilder::createSub(ConstantExprRef l, NonConstantExprRef r) 
     case Add: {
       // C_0 - (C_1 + X) ==> (C_0 - C1) - X
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getFirstChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createSub(createSub(l, CE), r->getSecondChild());
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createSub(createSub(l, CE), r->getSecondChild());
+#endif
       // C_0 - (X + C_1) ==> (C_0 - C1) - X
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getSecondChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createSub(createSub(l, CE), r->getFirstChild());
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createSub(createSub(l, CE), r->getFirstChild());
+#endif
       break;
     }
 
     case Sub: {
       // C_0 - (C_1 - X) ==> (C_0 - C1) + X
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getFirstChild())) {
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createAdd(createSub(l, CE), r->getSecondChild());
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(createSub(l, CE), r->getSecondChild());
+#endif
       }
       // C_0 - (X - C_1) ==> (C_0 + C1) - X
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getSecondChild())) {
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createSub(createAdd(l, CE), r->getFirstChild());
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createSub(createAdd(l, CE), r->getFirstChild());
+#endif
       }
       break;
     }
@@ -826,14 +1131,34 @@ ExprRef SymbolicExprBuilder::createSub(
     case Add:
       if (l->getChild(0)->isConstant()) {
         // (C + Y) - Z ==> C + (Y - Z)
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createAdd(l->getChild(0),
+            createSub(l->getChild(1), r));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(l->getChild(0),
             createSub(l->getChild(1), r));
+#endif
       }
     case Sub: {
       if (l->getChild(0)->isConstant()) {
         // (C - Y) - Z ==> C - (Y + Z)
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createSub(l->getChild(0),
+            createAdd(l->getChild(1), r));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createSub(l->getChild(0),
             createAdd(l->getChild(1), r));
+#endif
       }
     }
   }
@@ -842,20 +1167,56 @@ ExprRef SymbolicExprBuilder::createSub(
     case Add: {
       // X - (C_0 + Y) ==> -C_0 + (X - Y)
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getFirstChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createAdd(createNeg(CE), createSub(l, r->getSecondChild()));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(createNeg(CE), createSub(l, r->getSecondChild()));
+#endif
       // X - (Y + C_0) ==> -C_0 + (X - Y)
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getSecondChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createAdd(createNeg(CE), createSub(l, r->getFirstChild()));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(createNeg(CE), createSub(l, r->getFirstChild()));
+#endif
       break;
     }
 
     case Sub: {
       // X - (C_0 - Y) ==> -C_0 + (X + Y)
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getFirstChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createAdd(createNeg(CE), createAdd(l, r->getSecondChild()));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(createNeg(CE), createAdd(l, r->getSecondChild()));
+#endif
       // X - (Y - C_0) ==> C_0 + (X - Y)
       if (ConstantExprRef CE = castAs<ConstantExpr>(r->getSecondChild()))
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createSub(l, r);
+        ExprRef e1 = createAdd(CE, createSub(l, r->getFirstChild()));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createAdd(CE, createSub(l, r->getFirstChild()));
+#endif
       break;
     }
     default:
@@ -867,7 +1228,16 @@ ExprRef SymbolicExprBuilder::createSub(
 ExprRef SymbolicExprBuilder::createMul(ExprRef l, ExprRef r) {
   if (NonConstantExprRef nce_r = castAs<NonConstantExpr>(r)) {
     if (ConstantExprRef ce_l = castAs<ConstantExpr>(l))
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createMul(l, r);
+      ExprRef e1 = createMul(ce_l, nce_r);
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createMul(ce_l, nce_r);
+#endif
   }
 
   return ExprBuilder::createMul(l, r);
@@ -877,14 +1247,32 @@ ExprRef SymbolicExprBuilder::createMul(ConstantExprRef l, NonConstantExprRef r) 
   // C_0 * (C_1 * x) ==> (C_0 * C_1) * x
   if (auto me = castAs<MulExpr>(r)) {
     if (ConstantExprRef ce = castAs<ConstantExpr>(r->getLeft())) {
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createMul(l, r);
+      ExprRef e1 = createMul(createMul(l, ce), r->getRight());
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createMul(createMul(l, ce), r->getRight());
+#endif
     }
   }
 
   // C_0 * (C_1 + x) ==> C_0 * C_1 + C_0 * x
   if (auto ae = castAs<AddExpr>(r)) {
     if (ConstantExprRef ce = castAs<ConstantExpr>(r->getLeft())) {
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createMul(l, r);
+      ExprRef e1 = createAdd(createMul(l, ce), createMul(l, r->getRight()));
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createAdd(createMul(l, ce), createMul(l, r->getRight()));
+#endif
     }
   }
 
@@ -894,7 +1282,16 @@ ExprRef SymbolicExprBuilder::createMul(ConstantExprRef l, NonConstantExprRef r) 
 ExprRef SymbolicExprBuilder::createSDiv(ExprRef l, ExprRef r) {
   if (NonConstantExprRef nce_l = castAs<NonConstantExpr>(l)) {
     if (ConstantExprRef ce_r = castAs<ConstantExpr>(r))
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createSDiv(l, r);
+      ExprRef e1 = createSDiv(nce_l, ce_r);
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createSDiv(nce_l, ce_r);
+#endif
   }
 
   return ExprBuilder::createSDiv(l, r);
@@ -910,10 +1307,22 @@ ExprRef SymbolicExprBuilder::createSDiv(NonConstantExprRef l, ConstantExprRef r)
   if (auto sext_l = castAs<SExtExpr>(l)) {
     ExprRef x = sext_l->expr();
     if (x->bits() >= r->getActiveBits()) {
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createSDiv(l, r);
+      ExprRef e1 = createSExt(
+              createSDiv(x,
+                createExtract(r, 0, x->bits())),
+              l->bits());
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createSExt(
               createSDiv(x,
                 createExtract(r, 0, x->bits())),
               l->bits());
+#endif
     }
   }
 
@@ -921,7 +1330,16 @@ ExprRef SymbolicExprBuilder::createSDiv(NonConstantExprRef l, ConstantExprRef r)
   // (x / C_0) / C_1 = (x / (C_0 * C_1))
   if (auto se = castAs<SDivExpr>(l)) {
     if (ConstantExprRef ce = castAs<ConstantExpr>(l->getRight())) {
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createSDiv(l, r);
+      ExprRef e1 = createSDiv(l->getLeft(), createMul(ce, r));
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createSDiv(l->getLeft(), createMul(ce, r));
+#endif
     }
   }
   return ExprBuilder::createSDiv(l, r);
@@ -930,7 +1348,16 @@ ExprRef SymbolicExprBuilder::createSDiv(NonConstantExprRef l, ConstantExprRef r)
 ExprRef SymbolicExprBuilder::createUDiv(ExprRef l, ExprRef r) {
   if (NonConstantExprRef nce_l = castAs<NonConstantExpr>(l)) {
     if (ConstantExprRef ce_r = castAs<ConstantExpr>(r))
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createUDiv(l, r);
+      ExprRef e1 = createUDiv(nce_l, ce_r);
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createUDiv(nce_l, ce_r);
+#endif
   }
 
   return ExprBuilder::createUDiv(l, r);
@@ -949,6 +1376,12 @@ ExprRef SymbolicExprBuilder::createUDiv(NonConstantExprRef l, ConstantExprRef r)
             createUDiv(
               ce_r,
               createExtract(r, 0, ce_r->bits())));
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createUDiv(l, r);
+        checkOpt(e0, e);
+      }
+#endif
         return e;
       }
     }
@@ -958,7 +1391,16 @@ ExprRef SymbolicExprBuilder::createUDiv(NonConstantExprRef l, ConstantExprRef r)
   // (x / C_0) / C_1 = (x / (C_0 * C_1))
   if (auto se = castAs<UDivExpr>(l)) {
     if (ConstantExprRef ce = castAs<ConstantExpr>(l->getRight())) {
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createUDiv(l, r);
+      ExprRef e1 = createUDiv(l->getLeft(), createMul(ce, r));
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createUDiv(l->getLeft(), createMul(ce, r));
+#endif
     }
   }
   return ExprBuilder::createUDiv(l, r);
@@ -967,11 +1409,29 @@ ExprRef SymbolicExprBuilder::createUDiv(NonConstantExprRef l, ConstantExprRef r)
 ExprRef SymbolicExprBuilder::createAnd(ExprRef l, ExprRef r) {
   if (NonConstantExprRef nce_r = castAs<NonConstantExpr>(r)) {
     if (ConstantExprRef ce_l = castAs<ConstantExpr>(l))
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createAnd(l, r);
+      ExprRef e1 = createAnd(ce_l, nce_r);
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createAnd(ce_l, nce_r);
+#endif
     else {
       NonConstantExprRef nce_l = castAs<NonConstantExpr>(l);
       QSYM_ASSERT(nce_l != NULL);
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createAnd(l, r);
+        ExprRef e1 = createAnd(nce_l, nce_r);
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
       return createAnd(nce_l, nce_r);
+#endif
     }
   }
   else
@@ -992,9 +1452,20 @@ ExprRef SymbolicExprBuilder::createAnd(NonConstantExprRef l, NonConstantExprRef 
     if (auto ce_r = castAs<ConcatExpr>(r)) {
       if (ce_l->getLeft()->bits() == ce_r->getLeft()->bits()) {
         // right bits are same, because it is binary operation
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createAnd(l, r);
+        ExprRef e1 = createConcat(
+            createAnd(l->getLeft(), r->getLeft()),
+            createAnd(l->getRight(), r->getRight()));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createConcat(
             createAnd(l->getLeft(), r->getLeft()),
             createAnd(l->getRight(), r->getRight()));
+#endif
       }
     }
   }
@@ -1007,11 +1478,29 @@ ExprRef SymbolicExprBuilder::createOr(ExprRef l, ExprRef r) {
 
   if (NonConstantExprRef nce_r = castAs<NonConstantExpr>(r)) {
     if (ConstantExprRef ce_l = castAs<ConstantExpr>(l))
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createOr(l, r);
+      ExprRef e1 = createOr(ce_l, nce_r);
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
       return createOr(ce_l, nce_r);
+#endif
     else {
       NonConstantExprRef nce_l = castAs<NonConstantExpr>(l);
       QSYM_ASSERT(nce_l != NULL);
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createOr(l, r);
+        ExprRef e1 = createOr(nce_l, nce_r);
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
       return createOr(nce_l, nce_r);
+#endif
     }
   }
   else
@@ -1022,6 +1511,20 @@ ExprRef SymbolicExprBuilder::createOr(ConstantExprRef l, NonConstantExprRef r) {
   if (auto ce = castAs<ConcatExpr>(r)) {
     // C_0 | C(x, y) ==> C(C_0 | x, C_0 | y)
     // TODO: only for constant case
+#if DEBUG_CHECK_EXPR_OPTS 
+    {
+      ExprRef e0 = ExprBuilder::createOr(l, r);
+      ExprRef e1 = createConcat(
+        createOr(
+          createExtract(l, ce->getRight()->bits(), ce->getLeft()->bits()),
+          ce->getLeft()),
+        createOr(
+          createExtract(l, 0, ce->getRight()->bits()),
+          ce->getRight()));
+      checkOpt(e0, e1);
+      return e1;
+    }
+#else
     return createConcat(
         createOr(
           createExtract(l, ce->getRight()->bits(), ce->getLeft()->bits()),
@@ -1029,6 +1532,7 @@ ExprRef SymbolicExprBuilder::createOr(ConstantExprRef l, NonConstantExprRef r) {
         createOr(
           createExtract(l, 0, ce->getRight()->bits()),
           ce->getRight()));
+#endif
   }
 
   return ExprBuilder::createOr(l, r);
@@ -1044,9 +1548,20 @@ ExprRef SymbolicExprBuilder::createOr(NonConstantExprRef l, NonConstantExprRef r
     if (auto ce_r = castAs<ConcatExpr>(r)) {
       if (ce_l->getLeft()->bits() == ce_r->getLeft()->bits()) {
         // right bits are same, because it is binary operation
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createOr(l, r);
+        ExprRef e1 = createConcat(
+              createOr(l->getLeft(), r->getLeft()),
+              createOr(l->getRight(), r->getRight()));
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
         return createConcat(
             createOr(l->getLeft(), r->getLeft()),
             createOr(l->getRight(), r->getRight()));
+#endif
       }
     }
   }
@@ -1057,7 +1572,16 @@ ExprRef SymbolicExprBuilder::createOr(NonConstantExprRef l, NonConstantExprRef r
 ExprRef SymbolicExprBuilder::createXor(ExprRef l, ExprRef r) {
   if (NonConstantExprRef nce_r = castAs<NonConstantExpr>(r)) {
     if (NonConstantExprRef nce_l = castAs<NonConstantExpr>(l)) {
+#if DEBUG_CHECK_EXPR_OPTS 
+      {
+        ExprRef e0 = ExprBuilder::createOr(l, r);
+        ExprRef e1 = createXor(nce_l, nce_r);
+        checkOpt(e0, e1);
+        return e1;
+      }
+#else
       return createXor(nce_l, nce_r);
+#endif
     }
   }
 
