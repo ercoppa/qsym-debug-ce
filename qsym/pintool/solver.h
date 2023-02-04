@@ -55,6 +55,7 @@ public:
   int checkConsistencySMT(Z3_ast e, uint64_t expected_value);
   int checkConsistency(ExprRef e, uint64_t expected_value);
   void checkConsistencyOpt(ExprRef e0, ExprRef e1);
+  void saveDebugValues(uint64_t value, int n);
 #endif
 
 protected:

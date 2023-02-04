@@ -719,7 +719,7 @@ uint64_t Solver::concreteEvalute(Z3_ast e) {
 int Solver::checkConsistencySMT(Z3_ast e, uint64_t expected_value) {
 
   uint64_t value = concreteEvalute(e);
-  
+
   if (Z3_get_ast_kind(context_, e) == Z3_NUMERAL_AST) {
     if (value != expected_value) {
       Z3_set_ast_print_mode(context_, Z3_PRINT_LOW_LEVEL);
@@ -732,15 +732,124 @@ int Solver::checkConsistencySMT(Z3_ast e, uint64_t expected_value) {
   } else {
     if (value != expected_value) {
       Z3_set_ast_print_mode(context_, Z3_PRINT_LOW_LEVEL);
-      printf("%s\n", Z3_ast_to_string(context_, e));
+      // printf("%s\n", Z3_ast_to_string(context_, e));
       printf("BOOL FAILURE: %lx vs expected=%lx\n", value, expected_value);
     }
     return value == expected_value;
   }  
 }
 
+static uint64_t fuzz_check_count = 0;
+void Solver::saveDebugValues(uint64_t value, int n) {
+  std::vector<UINT8> values = getConcreteValues();
+
+  // If no output directory is specified, then just print it out
+  if (out_dir_.empty()) {
+    printValues(values);
+    return;
+  }
+
+  static char s_value[32];
+  sprintf(s_value, "%lx", value);
+  std::string fname = out_dir_+ "/debug_" + toString6digit(fuzz_check_count) + "_" + std::string(s_value) + "_" + std::to_string(n);
+
+  ofstream of(fname, std::ofstream::out | std::ofstream::binary);
+  LOG_INFO("DEBUG testcase: " + fname + "\n");
+  if (of.fail())
+    LOG_FATAL("Unable to open a file to write results\n");
+
+      // TODO: batch write
+      for (unsigned i = 0; i < values.size(); i++) {
+        char val = values[i];
+        of.write(&val, sizeof(val));
+      }
+
+  of.close();
+}
+
 int Solver::checkConsistency(ExprRef e, uint64_t expected_value) {
-  return checkConsistencySMT(e->toZ3Expr(), expected_value);
+  int res = checkConsistencySMT(e->toZ3Expr(), expected_value);
+
+#if DEBUG_FUZZ_EXPRS
+
+  int fuzz_expr = -1;
+  uint64_t fuzz_count = 0;
+  uint64_t fuzz_value = 0;
+  if (fuzz_expr == -1) {
+
+    if (getenv("DEBUG_FUZZ_EXPR"))
+      fuzz_expr = 1;
+    else
+      fuzz_expr = 0;
+
+    if (fuzz_expr) {
+      if (getenv("DEBUG_FUZZ_EXPR_COUNT"))
+        fuzz_count = atoi(getenv("DEBUG_FUZZ_EXPR_COUNT"));
+      else
+        abort();
+
+      if (getenv("DEBUG_FUZZ_EXPR_VALUE"))
+        fuzz_value = strtol(getenv("DEBUG_FUZZ_EXPR_VALUE"), NULL, 16);
+      else
+        abort();
+    }
+  }
+
+  fuzz_check_count += 1;
+  if (fuzz_expr) {
+    if (fuzz_count == fuzz_check_count) {
+      if (fuzz_value == expected_value) {
+        printf("Expression has expected value!\n");
+        exit(0);
+      } else {
+        printf("Expression has wrong value [%lx vs expected=%lx]\n", expected_value, fuzz_value);
+        exit(66);
+      }
+    } else if (fuzz_count < fuzz_check_count) {
+      printf("Expression check has been bypassed [count is larger]\n");
+      exit(66);
+    }
+    return res;
+  }
+
+  reset();
+  syncConstraints(e);
+  z3::expr expr = e->toZ3Expr();
+  solver_.push();
+  uint64_t current_value = expected_value;
+  for (int i = 0; i < DEBUG_FUZZ_EXPRS_N; i++) {
+    bool is_bool = isRelational(e.get());
+    z3::expr not_e = is_bool 
+      ? g_expr_builder->createLNot(e)->toZ3Expr() 
+      : g_expr_builder->createDistinct(e, g_expr_builder->createConstant(current_value, e->bits()))->toZ3Expr();
+    solver_.add(not_e);
+    z3::check_result feasible = solver_.check();
+    if (feasible == z3::sat) {
+      Z3_model model = solver_.get_model();
+      Z3_ast solution = nullptr;
+      Z3_model_eval(context_, model, expr, Z3_TRUE, &solution);
+      uint64_t value = 0;
+      if (is_bool) {
+        Z3_lbool res = Z3_get_bool_value(context_, solution);
+        if (res == Z3_L_TRUE)
+          value = 1;
+        else if (res == Z3_L_FALSE)
+          value = 0;
+        else
+          abort();
+      } else
+        Z3_get_numeral_uint64(context_, solution, &value);
+      assert(current_value != value);
+      current_value = value;
+      saveDebugValues(value, i);
+    } 
+    if (is_bool) break;
+  }
+  solver_.pop();
+  reset();
+#endif
+
+  return res;
 }
 
 void Solver::checkConsistencyOpt(ExprRef e0, ExprRef e1) {
