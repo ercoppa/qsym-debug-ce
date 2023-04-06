@@ -6,6 +6,7 @@
 static uint32_t debug_count;
 static uint32_t debug_hash;
 static uint32_t debug_taken;
+extern int debug_abort;
 #endif
 
 namespace qsym {
@@ -193,7 +194,7 @@ void Solver::addJcc(ExprRef e, bool taken, ADDRINT pc) {
   debug_taken = taken ? 1 : 0;
   debug_hash ^= pc; 
 
-  // printf("DEBUG HASH: %lx - %lx\n", debug_hash, pc);
+  // printf("DEBUG HASH: %lx - %lx - %d\n", debug_hash, pc, debug_count);
 
   static int check_input = -1;
   static uint32_t check_input_count = 0;
@@ -201,12 +202,18 @@ void Solver::addJcc(ExprRef e, bool taken, ADDRINT pc) {
   static uint32_t check_input_taken = 0;
   if (check_input == -1) {
 
-    if (getenv("DEBUG_CHECK_INPUT"))
-      check_input = 1;
-    else
+    char* s = getenv("DEBUG_CHECK_INPUT");
+    if (s) {
+      if (strcmp(s, "DUMP") == 0)
+        check_input = 1;
+      else if (strcmp(s, "CHECK") == 0)
+        check_input = 2;
+      else
+        abort();
+    } else
       check_input = 0;
 
-    if (check_input) {
+    if (check_input == 2) {
       if (getenv("DEBUG_CHECK_INPUT_COUNT"))
         check_input_count = atoi(getenv("DEBUG_CHECK_INPUT_COUNT"));
       else
@@ -224,7 +231,7 @@ void Solver::addJcc(ExprRef e, bool taken, ADDRINT pc) {
     }
   }
 
-  if (check_input) {
+  if (check_input == 2) {
     // printf("Checking...\n");
     if (debug_count == check_input_count) {
       if (debug_hash == check_input_hash) {
@@ -233,15 +240,18 @@ void Solver::addJcc(ExprRef e, bool taken, ADDRINT pc) {
           exit(0);
         } else {
           printf("Input is divergent: it reaches the same branch but does not take the expected direction!\n");
-          exit(66);
+          if (debug_abort) abort();
+          else exit(0);
         }
       } else {
         printf("Input is divergent: it does take the same path! [hash is different: %x vs expected=%x]\n", debug_hash, check_input_hash);
-        exit(66);
+        if (debug_abort) abort();
+        else exit(0);
       }
     } else if (debug_count > check_input_count) {
       printf("Input is divergent: it does take the same path! [count is larger]\n");
-      exit(66);
+      if (debug_abort) abort();
+      else exit(0);
     }
   } 
 #endif
@@ -262,35 +272,61 @@ void Solver::addJcc(ExprRef e, bool taken, ADDRINT pc) {
     negatePath(e, taken);
   addConstraint(e, taken, is_interesting);
 
-#if DEBUG_CHECK_PI_SOLVER
-  reset();
-  printf("Checking PI at %lx\n", pc);
-  syncConstraints(e);
-  if(solver_.check() == z3::unsat) {
-    LOG_FATAL("Adding infeasible constraints: " + std::string(taken ? "" : "!") + e->toString() + "\n");
-    abort();
-  } else {
-    // printf("\nPI OK\n\n");
+#if DEBUG_CHECK_PI_SOLVER || DEBUG_CHECK_PI_CONCRETE
+  static int check_pi = -1;
+  if (check_pi == -1) {
+
+    char* s = getenv("DEBUG_CHECK_PI");
+    if (s == NULL)
+      check_pi = 0;
+    else if (strcmp(s, "EVAL") == 0)
+      check_pi = 1;
+    else if (strcmp(s, "SMT") == 0)
+      check_pi = 2;
+    else
+      abort();
   }
-  reset();
+#endif
+
+#if DEBUG_CHECK_PI_SOLVER
+  if (check_pi == 2) {
+    reset();
+    syncConstraints(e);
+    z3::expr_vector assertions = solver_.assertions();
+    printf("CHECKING PI SMT (n=%d)\n", assertions.size());
+    if(solver_.check() == z3::unsat) {
+      LOG_INFO("Adding infeasible constraints: " + std::string(taken ? "" : "!") + e->toString() + "\n");
+      if (debug_abort) abort();
+      printf("CHECKING PI SMT: KO\n");
+    } else if (solver_.check() == z3::unknown) {
+      printf("CHECKING PI SMT: KO [unknown]\n");
+    }else {
+      printf("CHECKING PI SMT: OK\n");
+    }
+    reset();
+  }
 #endif
 
 #if DEBUG_CHECK_PI_CONCRETE
-  reset();
-  LOG_INFO("Checking PI CONCRETE\n");
-  syncConstraints(e);
-
-  z3::expr_vector assertions = solver_.assertions();
-  if (assertions.size() > 0) {
-    Z3_ast query = z3::mk_and(assertions);
-    if(checkConsistencySMT(query, 1) == 0) {
-      LOG_FATAL("Adding infeasible constraints: " + std::string(taken ? "" : "!") + e->toString() + "\n");
-      abort();
-    } else {
-      // printf("\nPI OK\n\n");
+  if (check_pi == 1) {
+    reset();
+    syncConstraints(e);
+    z3::expr_vector assertions = solver_.assertions();
+    if (assertions.size() > 0) {
+      printf("CHECKING PI EVAL (n=%d)\n", assertions.size());
+      Z3_ast query = z3::mk_and(assertions);
+      Z3_inc_ref(context_, query);
+      if(checkConsistencySMT(query, 1) == 0) {
+        LOG_INFO("Adding infeasible constraints: " + std::string(taken ? "" : "!") + e->toString() + "\n");
+        if (debug_abort) abort();
+        printf("CHECKING PI EVAL: KO\n");
+      } else {
+        printf("CHECKING PI EVAL: OK\n");
+      }
+      Z3_dec_ref(context_, query);
     }
+    reset();
   }
-  reset();
 #endif
 
 }
@@ -428,7 +464,7 @@ void Solver::saveValues(const std::string& postfix) {
     return;
   }
 
-  std::string fname = out_dir_+ "/" + toString6digit(num_generated_);
+  std::string fname = out_dir_+ "/input"; // + toString6digit(num_generated_);
   // Add postfix to record where it is genereated
   if (!postfix.empty())
       fname = fname + "-" + postfix;
@@ -437,8 +473,8 @@ void Solver::saveValues(const std::string& postfix) {
     static char s_count[16];
     static char s_hash[32];
     sprintf(s_hash, "%x", debug_hash);
-    sprintf(s_count, "%d", debug_count);
-    fname = fname + "_" + std::string(s_hash) + "_" + std::string(s_count) + "_" + (debug_taken ? "1" : "0");
+    sprintf(s_count, "%05d", debug_count);
+    fname = fname + "_" + std::string(s_count) + "_" + std::string(s_hash) + "_" + (debug_taken ? "1" : "0");
   }
 #endif
 
@@ -635,12 +671,21 @@ bool Solver::isInterestingJcc(ExprRef rel_expr, bool taken, ADDRINT pc) {
 }
 
 void Solver::negatePath(ExprRef e, bool taken) {
+
+  static int skip_optimistic = -1;
+  if (skip_optimistic == -1) {
+    if (getenv("SYMCC_SKIP_OPTIMISTIC"))
+      skip_optimistic = 1;
+    else
+      skip_optimistic = 0;
+  }
+
   reset();
   syncConstraints(e);
   addToSolver(e, !taken);
   // printf("CONSTRAINT: %s\n", e->toString().c_str());
   bool sat = checkAndSave();
-  if (!sat) {
+  if (!sat && skip_optimistic != 1) {
     reset();
     // optimistic solving
     addToSolver(e, !taken);
@@ -664,7 +709,7 @@ void Solver::checkFeasible() {
 
 #if DEBUG_CONSISTENCY_CHECK || DEBUG_CHECK_PI_CONCRETE
 
-uint64_t Solver::concreteEvalute(Z3_ast e) {
+uint64_t Solver::concreteEvaluate(Z3_ast e) {
   static Z3_model m = NULL;
   if (m == NULL) {
     Z3_set_ast_print_mode(context_, Z3_PRINT_LOW_LEVEL);
@@ -686,7 +731,7 @@ uint64_t Solver::concreteEvalute(Z3_ast e) {
     // printf("Model:\n%s\n", Z3_model_to_string(context_, m));
   }
 
-  // printf("EXPR: %s\n", Z3_ast_to_string(context_, e));
+  // printf("EXPR: %s %p\n", Z3_ast_to_string(context_, e), (void*)e);
 
   uint64_t  value;
   Z3_ast    solution;
@@ -718,25 +763,15 @@ uint64_t Solver::concreteEvalute(Z3_ast e) {
 
 int Solver::checkConsistencySMT(Z3_ast e, uint64_t expected_value) {
 
-  uint64_t value = concreteEvalute(e);
+  uint64_t value = concreteEvaluate(e);
 
-  if (Z3_get_ast_kind(context_, e) == Z3_NUMERAL_AST) {
-    if (value != expected_value) {
-      Z3_set_ast_print_mode(context_, Z3_PRINT_LOW_LEVEL);
-      printf("%s\n", Z3_ast_to_string(context_, e));
-      printf("FAILURE: %lx vs expected=%lx\n", value, expected_value);
-    } else {
-      printf("SUCCESS: %lx vs expected=%lx\n", value, expected_value);
-    }
-    return value == expected_value;
-  } else {
-    if (value != expected_value) {
-      Z3_set_ast_print_mode(context_, Z3_PRINT_LOW_LEVEL);
-      // printf("%s\n", Z3_ast_to_string(context_, e));
-      printf("BOOL FAILURE: %lx vs expected=%lx\n", value, expected_value);
-    }
-    return value == expected_value;
-  }  
+  int check = value == expected_value;
+  if (!check) {
+    fprintf(stderr, "%s: %lx vs expected=%lx\n", check ? "SUCCESS" : "FAILURE", value, expected_value);
+    // Z3_set_ast_print_mode(g_context, Z3_PRINT_LOW_LEVEL);
+    // printf("%s\n", Z3_ast_to_string(g_context, e));
+  }
+  return check;
 }
 
 static uint64_t fuzz_check_count = 0;
@@ -767,22 +802,43 @@ void Solver::saveDebugValues(uint64_t value, int n) {
   of.close();
 }
 
+extern "C" {
+  int check_expr = -1;
+}
 int Solver::checkConsistency(ExprRef e, uint64_t expected_value) {
-  int res = checkConsistencySMT(e->toZ3Expr(), expected_value);
+
+  if (check_expr == -1) {
+    char* s = getenv("DEBUG_EXPR_CONSISTENCY");
+    if (s == NULL)
+      check_expr = 0;
+    else
+      check_expr = 1;
+  }
+
+  int res = check_expr ? checkConsistencySMT(e->toZ3Expr(), expected_value) : 1;
+
+  if (check_expr) {
+    printf("CHECK_EXPR: %s\n", res ? "SUCCESS" : "FAILURE");
+  }
 
 #if DEBUG_FUZZ_EXPRS
 
-  int fuzz_expr = -1;
-  uint64_t fuzz_count = 0;
-  uint64_t fuzz_value = 0;
+  static int fuzz_expr = -1;
+  static uint64_t fuzz_count = 0;
+  static uint64_t fuzz_value = 0;
   if (fuzz_expr == -1) {
 
-    if (getenv("DEBUG_FUZZ_EXPR"))
-      fuzz_expr = 1;
-    else
+    char* s = getenv("DEBUG_FUZZ_EXPR");
+    if (s == nullptr)
       fuzz_expr = 0;
+    else if (strcmp(s, "DUMP") == 0)
+      fuzz_expr = 1;
+    else if (strcmp(s, "CHECK") == 0)
+      fuzz_expr = 2;
+    else
+      abort();
 
-    if (fuzz_expr) {
+    if (fuzz_expr == 2) {
       if (getenv("DEBUG_FUZZ_EXPR_COUNT"))
         fuzz_count = atoi(getenv("DEBUG_FUZZ_EXPR_COUNT"));
       else
@@ -796,87 +852,119 @@ int Solver::checkConsistency(ExprRef e, uint64_t expected_value) {
   }
 
   fuzz_check_count += 1;
-  if (fuzz_expr) {
+  if (fuzz_expr == 2) { 
+
+    // printf("fuzz_check_count: %d [%d]\n", fuzz_check_count, fuzz_count);
     if (fuzz_count == fuzz_check_count) {
       if (fuzz_value == expected_value) {
         printf("Expression has expected value!\n");
         exit(0);
       } else {
         printf("Expression has wrong value [%lx vs expected=%lx]\n", expected_value, fuzz_value);
-        exit(66);
+        if (debug_abort) abort();
+        else exit(0);
       }
     } else if (fuzz_count < fuzz_check_count) {
       printf("Expression check has been bypassed [count is larger]\n");
-      exit(66);
+      if (debug_abort) abort();
+      else exit(0);
     }
     return res;
   }
 
-  reset();
-  syncConstraints(e);
-  z3::expr expr = e->toZ3Expr();
-  solver_.push();
-  uint64_t current_value = expected_value;
-  for (int i = 0; i < DEBUG_FUZZ_EXPRS_N; i++) {
-    bool is_bool = isRelational(e.get());
-    z3::expr not_e = is_bool 
-      ? g_expr_builder->createLNot(e)->toZ3Expr() 
-      : g_expr_builder->createDistinct(e, g_expr_builder->createConstant(current_value, e->bits()))->toZ3Expr();
-    solver_.add(not_e);
-    z3::check_result feasible = solver_.check();
-    if (feasible == z3::sat) {
-      Z3_model model = solver_.get_model();
-      Z3_ast solution = nullptr;
-      Z3_model_eval(context_, model, expr, Z3_TRUE, &solution);
-      uint64_t value = 0;
-      if (is_bool) {
-        Z3_lbool res = Z3_get_bool_value(context_, solution);
-        if (res == Z3_L_TRUE)
-          value = 1;
-        else if (res == Z3_L_FALSE)
-          value = 0;
-        else
-          abort();
-      } else
-        Z3_get_numeral_uint64(context_, solution, &value);
-      assert(current_value != value);
-      current_value = value;
-      saveDebugValues(value, i);
-    } 
-    if (is_bool) break;
+  if (fuzz_expr == 1) {
+    reset();
+    syncConstraints(e);
+    z3::expr expr = e->toZ3Expr();
+    solver_.push();
+    uint64_t current_value = expected_value;
+    for (int i = 0; i < DEBUG_FUZZ_EXPRS_N; i++) {
+      bool is_bool = isRelational(e.get());
+      z3::expr not_e = is_bool 
+        ? current_value == 1 
+            ? g_expr_builder->createLNot(e)->toZ3Expr() 
+            : e->toZ3Expr()
+        : g_expr_builder->createDistinct(e, g_expr_builder->createConstant(current_value, e->bits()))->toZ3Expr();
+      solver_.add(not_e);
+      z3::check_result feasible = solver_.check();
+      if (feasible == z3::sat) {
+        Z3_model model = solver_.get_model();
+        Z3_ast solution = nullptr;
+        Z3_model_eval(context_, model, expr, Z3_TRUE, &solution);
+        uint64_t value = 0;
+        if (is_bool) {
+          Z3_lbool res = Z3_get_bool_value(context_, solution);
+          if (res == Z3_L_TRUE)
+            value = 1;
+          else if (res == Z3_L_FALSE)
+            value = 0;
+          else
+            abort();
+        } else
+          Z3_get_numeral_uint64(context_, solution, &value);
+        assert(current_value != value);
+        current_value = value;
+        saveDebugValues(value, i);
+      } else break;
+      if (is_bool) break;
+    }
+    solver_.pop();
+    reset();
   }
-  solver_.pop();
-  reset();
 #endif
 
   return res;
 }
 
 void Solver::checkConsistencyOpt(ExprRef e0, ExprRef e1) {
-  printf("CHECKING OPT\n");
-  uint64_t v0 = concreteEvalute(e0->toZ3Expr());
-  uint64_t v1 = concreteEvalute(e1->toZ3Expr());
-  if (v0 != v1) {
-    printf("[EVAL] Invalid expression optimization!\n");
-    printf("E0: %s\n", e0->toString().c_str());
-    printf("E1: %s\n", e1->toString().c_str()); 
-    abort();
+
+  static int check_opt = -1;
+  if (check_opt == -1) {
+
+    char* s = getenv("DEBUG_CHECK_OPT");
+    if (s == NULL)
+      check_opt = 0;
+    else if (strcmp(s, "EVAL") == 0)
+      check_opt = 1;
+    else if (strcmp(s, "SMT") == 0)
+      check_opt = 2;
+    else
+      abort();
   }
 
-  reset();
-  ExprRef c = g_expr_builder->createDistinct(e0, e1);
-  addToSolver(c, true);
-  if (c->kind() != Bool && check() == z3::sat) {
-    printf("[SAT] Invalid expression optimization!\n");
-    printf("E0: %s\n", e0->toString().c_str());
-    printf("E1: %s\n", e1->toString().c_str()); 
-    printf("CHECK: %s\n", c->toString().c_str());
-    checkAndSave("correctness");
-    // const char* s = Z3_solver_to_string(context_, solver_);
-    // printf("SOLVER:\n%s\n", s ? s : "NULL");
-    abort();
+  if (check_opt == 1) {
+    printf("CHECKING OPT EVAL\n");
+    uint64_t v0 = concreteEvaluate(e0->toZ3Expr());
+    uint64_t v1 = concreteEvaluate(e1->toZ3Expr());
+    if (v0 != v1) {
+      printf("[EVAL] Invalid expression optimization!\n");
+      printf("E0: %s\n", e0->toString().c_str());
+      printf("E1: %s\n", e1->toString().c_str()); 
+      if (debug_abort) abort();
+    } else {
+      printf("CHECKING OPT EVAL: OK\n");
+    }
   }
-  reset();
+
+  if (check_opt == 2) {
+    printf("CHECKING OPT SMT\n");
+    reset();
+    ExprRef c = g_expr_builder->createDistinct(e0, e1);
+    addToSolver(c, true);
+    if (c->kind() != Bool && check() == z3::sat) {
+      printf("[SAT] Invalid expression optimization!\n");
+      printf("E0: %s\n", e0->toString().c_str());
+      printf("E1: %s\n", e1->toString().c_str()); 
+      printf("CHECK: %s\n", c->toString().c_str());
+      // checkAndSave("correctness");
+      // const char* s = Z3_solver_to_string(context_, solver_);
+      // printf("SOLVER:\n%s\n", s ? s : "NULL");
+      if (debug_abort) abort();
+    } else {
+      printf("CHECKING OPT SMT: OK\n");
+    }
+    reset();
+  }
 }
 #endif
 
