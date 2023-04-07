@@ -269,7 +269,7 @@ void Solver::addJcc(ExprRef e, bool taken, ADDRINT pc) {
 #endif
 
   if (is_interesting)
-    negatePath(e, taken);
+    negatePath(e, !taken);
   addConstraint(e, taken, is_interesting);
 
 #if DEBUG_CHECK_PI_SOLVER || DEBUG_CHECK_PI_CONCRETE
@@ -933,35 +933,35 @@ void Solver::checkConsistencyOpt(ExprRef e0, ExprRef e1) {
   }
 
   if (check_opt == 1) {
-    printf("CHECKING OPT EVAL\n");
+    fprintf(stderr, "CHECKING OPT EVAL\n");
     uint64_t v0 = concreteEvaluate(e0->toZ3Expr());
     uint64_t v1 = concreteEvaluate(e1->toZ3Expr());
     if (v0 != v1) {
-      printf("[EVAL] Invalid expression optimization!\n");
-      printf("E0: %s\n", e0->toString().c_str());
-      printf("E1: %s\n", e1->toString().c_str()); 
+      fprintf(stderr, "[EVAL] Invalid expression optimization!\n");
+      fprintf(stderr, "E0: %s\n", e0->toString().c_str());
+      fprintf(stderr, "E1: %s\n", e1->toString().c_str()); 
       if (debug_abort) abort();
     } else {
-      printf("CHECKING OPT EVAL: OK\n");
+      fprintf(stderr, "CHECKING OPT EVAL: OK\n");
     }
   }
 
   if (check_opt == 2) {
-    printf("CHECKING OPT SMT\n");
+    fprintf(stderr, "CHECKING OPT SMT\n");
     reset();
     ExprRef c = g_expr_builder->createDistinct(e0, e1);
     addToSolver(c, true);
     if (c->kind() != Bool && check() == z3::sat) {
-      printf("[SAT] Invalid expression optimization!\n");
-      printf("E0: %s\n", e0->toString().c_str());
-      printf("E1: %s\n", e1->toString().c_str()); 
-      printf("CHECK: %s\n", c->toString().c_str());
+      fprintf(stderr, "[SAT] Invalid expression optimization!\n");
+      fprintf(stderr, "E0: %s\n", e0->toString().c_str());
+      fprintf(stderr, "E1: %s\n", e1->toString().c_str()); 
+      fprintf(stderr, "CHECK: %s\n", c->toString().c_str());
       // checkAndSave("correctness");
       // const char* s = Z3_solver_to_string(context_, solver_);
       // printf("SOLVER:\n%s\n", s ? s : "NULL");
       if (debug_abort) abort();
     } else {
-      printf("CHECKING OPT SMT: OK\n");
+      fprintf(stderr, "CHECKING OPT SMT: OK\n");
     }
     reset();
   }
