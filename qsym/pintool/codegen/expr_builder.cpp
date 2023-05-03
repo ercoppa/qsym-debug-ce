@@ -1574,7 +1574,7 @@ ExprRef SymbolicExprBuilder::createXor(ExprRef l, ExprRef r) {
     if (NonConstantExprRef nce_l = castAs<NonConstantExpr>(l)) {
 #if DEBUG_CHECK_EXPR_OPTS 
       {
-        ExprRef e0 = ExprBuilder::createOr(l, r);
+        ExprRef e0 = ExprBuilder::createXor(l, r);
         ExprRef e1 = createXor(nce_l, nce_r);
         checkOpt(e0, e1);
         return e1;
